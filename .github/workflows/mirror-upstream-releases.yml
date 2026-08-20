@@ -1,0 +1,57 @@
+name: Mirror upstream releases
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-upstream-releases
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM: BigBodyCobain/Shadowbroker
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Mirror upstream GitHub releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/upstream-releases"
+          cd "$RUNNER_TEMP/upstream-releases"
+
+          gh api --paginate "/repos/${UPSTREAM}/releases?per_page=100" --jq '.[] | [.tag_name, .name, (.draft|tostring), (.prerelease|tostring)] | @tsv' > releases.tsv
+
+          while IFS=$'\t' read -r tag title draft prerelease; do
+            [ -n "$tag" ] || continue
+
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Already mirrored: $tag"
+              continue
+            fi
+
+            echo "Mirroring: $tag"
+            workdir="$RUNNER_TEMP/upstream-releases/$tag"
+            mkdir -p "$workdir/assets"
+
+            gh api "/repos/${UPSTREAM}/releases/tags/${tag}" --jq '.body // ""' > "$workdir/notes.md"
+            gh release download "$tag" --repo "$UPSTREAM" --dir "$workdir/assets" || true
+
+            # Preserve the upstream tag name. If the tag is absent in this fork,
+            # GitHub creates it at the fork's current default-branch head.
+            args=(release create "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$workdir/notes.md")
+            if [ -n "$title" ]; then args+=(--title "$title"); fi
+            if [ "$draft" = "true" ]; then args+=(--draft); fi
+            if [ "$prerelease" = "true" ]; then args+=(--prerelease); fi
+
+            shopt -s nullglob
+            assets=("$workdir/assets"/*)
+            if [ ${#assets[@]} -gt 0 ]; then args+=("${assets[@]}"); fi
+            gh "${args[@]}"
+          done < releases.tsv
